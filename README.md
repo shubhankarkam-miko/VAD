@@ -5,3 +5,4 @@
 5. https://arxiv.org/abs/2605.20755 - https://github.com/Ruiqi-Yan/Awesome-Full-Duplex-SDM
 6. https://arxiv.org/abs/2603.14877 - https://github.com/Soul-AILab/SoulX-Duplug
 7. https://arxiv.org/abs/2502.14145 
+8. https://huggingface.co/datasets/pipecat-ai/smart-turn-data-v3.2-train

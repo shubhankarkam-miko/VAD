@@ -13,6 +13,8 @@ Usage:
     python3 childes_scraper.py --username ... --password ... --targets-file my_urls.txt
 """
 
+from __future__ import annotations  # FIX: allows tuple[int, int] hints on Python 3.7/3.8
+
 import os
 import re
 import time
@@ -88,16 +90,27 @@ def browser_login(username: str, password: str, headless: bool = True) -> dict:
         page.wait_for_selector("input", timeout=10_000)
         inputs = page.query_selector_all("input")
 
-        for inp in inputs:
-            typ = (inp.get_attribute("type") or "text").lower()
-            if typ in ("hidden", "password", "submit", "button", "checkbox", "radio"):
-                continue
-            inp.scroll_into_view_if_needed()
-            inp.click()
-            inp.fill("")
-            inp.type(username, delay=50)
-            print(f"[AUTH] Filled email.")
-            break
+        # FIX: try semantic selectors first, fall back to exclusion logic
+        user_input = page.query_selector(
+            "input[name='username'], input[name='email'], input[type='email']"
+        )
+        if user_input:
+            user_input.scroll_into_view_if_needed()
+            user_input.click()
+            user_input.fill("")
+            user_input.type(username, delay=50)
+            print("[AUTH] Filled email.")
+        else:
+            for inp in inputs:
+                typ = (inp.get_attribute("type") or "text").lower()
+                if typ in ("hidden", "password", "submit", "button", "checkbox", "radio"):
+                    continue
+                inp.scroll_into_view_if_needed()
+                inp.click()
+                inp.fill("")
+                inp.type(username, delay=50)
+                print("[AUTH] Filled email.")
+                break
 
         for inp in inputs:
             if (inp.get_attribute("type") or "").lower() == "password":
@@ -170,11 +183,13 @@ def fmt_duration(seconds: float) -> str:
 
 def fmt_size(size_bytes: int) -> str:
     """Format bytes as human-readable string."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
+    # FIX: use a separate float variable to avoid shadowing the int parameter
+    val = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024:
+            return f"{val:.1f} {unit}"
+        val /= 1024
+    return f"{val:.1f} PB"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +240,8 @@ METADATA_HEADERS = [
 ]
 
 def append_metadata(row: dict, metadata_file: str) -> None:
-    write_header = not os.path.exists(metadata_file)
+    # FIX: check file size instead of existence to avoid TOCTOU race
+    write_header = not os.path.exists(metadata_file) or os.path.getsize(metadata_file) == 0
     with open(metadata_file, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=METADATA_HEADERS, delimiter="\t",
                                 extrasaction="ignore")
@@ -242,6 +258,20 @@ def append_metadata(row: dict, metadata_file: str) -> None:
 def url_to_local_path(norm_url: str, base_dir: str) -> str:
     rel = urlparse(norm_url).path.lstrip("/")
     return os.path.join(base_dir, rel)
+
+
+def already_have(local: str) -> bool:
+    """
+    FIX: Return True if this file (or a preferred-format equivalent) already exists.
+    Specifically, skip MP3 downloads when a WAV of the same name already exists,
+    to avoid wasting bandwidth on files that dedupe() would remove anyway.
+    """
+    if os.path.exists(local):
+        return True
+    base, ext = os.path.splitext(local)
+    if ext.lower() == ".mp3" and os.path.exists(base + ".wav"):
+        return True
+    return False
 
 
 def crawl(session: requests.Session, url: str, base_dir: str,
@@ -285,7 +315,8 @@ def crawl(session: requests.Session, url: str, base_dir: str,
             local = url_to_local_path(full, base_dir)
             os.makedirs(os.path.dirname(local), exist_ok=True)
 
-            if os.path.exists(local):
+            # FIX: use already_have() to also skip MP3s when WAV already exists
+            if already_have(local):
                 print(f"{pad}  [SKIP] {fname}")
                 skipped += 1
                 continue
@@ -298,15 +329,23 @@ def crawl(session: requests.Session, url: str, base_dir: str,
                 if "text/html" in fr.headers.get("content-type", ""):
                     print(f"{pad}  [WARN] Got HTML for {fname} — auth issue?")
                     continue
-                with open(local, "wb") as fh:
+                # FIX: write to .tmp file first, rename on success to avoid
+                # leaving corrupt partial files that get permanently skipped
+                tmp = local + ".tmp"
+                with open(tmp, "wb") as fh:
                     for chunk in fr.iter_content(65536):
                         fh.write(chunk)
+                os.replace(tmp, local)  # atomic rename
                 kb = os.path.getsize(local) / 1024
                 print(f"{pad}  [OK]   {fname}  ({kb:.0f} KB)")
                 downloaded += 1
                 time.sleep(REQUEST_DELAY)
             except requests.RequestException as e:
                 print(f"{pad}  [ERR]  {fname}: {e}")
+                # Clean up any partial .tmp file on error
+                tmp = local + ".tmp"
+                if os.path.exists(tmp):
+                    os.remove(tmp)
 
         elif not ext and full != url and full not in visited:
             if urlparse(full).path.startswith(urlparse(url).path):

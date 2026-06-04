@@ -1,4 +1,4 @@
-"""=====================================
+"""
 Reads target URLs from targets.txt, downloads recursively with auth,
 preserves folder structure, skips already-downloaded files, and appends
 per-hub metadata (duration, size) to download_metadata.tsv after each hub.
